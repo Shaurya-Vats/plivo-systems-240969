@@ -26,19 +26,23 @@ int main() {
         return 1;
     }
 
-    uint8_t group_payloads[FEC_GROUP][FRAME_PAYLOAD_SIZE];
-    uint32_t group_seqs[FEC_GROUP];
+    uint8_t group_payloads[FEC_K][FRAME_PAYLOAD_SIZE];
+    uint32_t group_seqs[FEC_K];
     int group_count = 0;
 
     while (true) {
         uint8_t in_buf[164];
         ssize_t n = recv(src_fd, in_buf, sizeof(in_buf), 0);
         if (n <= 0) break;
+        if (n < 164) continue; // Boundary defense against short/malformed reads
 
-        uint32_t seq = ntohl(*(uint32_t*)in_buf);
+        uint32_t seq;
+        memcpy(&seq, in_buf, 4);
+        seq = ntohl(seq);
+
         uint8_t* payload = in_buf + 4;
 
-        // Construct and transmit data frame
+        // Transmit DATA frame
         Header data_hdr;
         data_hdr.seq = htonl(seq);
         data_hdr.type = 0;
@@ -50,29 +54,47 @@ int main() {
 
         sendto(dst_fd, out_buf, sizeof(out_buf), 0, (struct sockaddr*)&dst_addr, sizeof(dst_addr));
 
-        // Store for parity calculation
+        // Buffer frame for 2D parity calculation
         memcpy(group_payloads[group_count], payload, FRAME_PAYLOAD_SIZE);
         group_seqs[group_count] = seq;
         group_count++;
 
-        // Send parity frame when group is filled
-        if (group_count == FEC_GROUP) {
-            uint8_t parity_payload[FRAME_PAYLOAD_SIZE] = {0};
-            for (int i = 0; i < FEC_GROUP; i++) {
+        // Send multi-parity redundancy frames when block is complete
+        if (group_count == FEC_K) {
+            // Row Parity (All elements XORed)
+            uint8_t row_parity[FRAME_PAYLOAD_SIZE] = {0};
+            for (int i = 0; i < FEC_K; i++) {
                 for (int j = 0; j < FRAME_PAYLOAD_SIZE; j++) {
-                    parity_payload[j] ^= group_payloads[i][j];
+                    row_parity[j] ^= group_payloads[i][j];
                 }
             }
 
-            Header parity_hdr;
-            parity_hdr.seq = htonl(group_seqs[0]);
-            parity_hdr.type = 1; // Parity
-            parity_hdr.group_base = htonl(group_seqs[0]);
+            Header r_hdr;
+            r_hdr.seq = htonl(group_seqs[0]);
+            r_hdr.type = 1; // Row Parity
+            r_hdr.group_base = htonl(group_seqs[0]);
 
-            memcpy(out_buf, &parity_hdr, sizeof(Header));
-            memcpy(out_buf + sizeof(Header), parity_payload, FRAME_PAYLOAD_SIZE);
-
+            memcpy(out_buf, &r_hdr, sizeof(Header));
+            memcpy(out_buf + sizeof(Header), row_parity, FRAME_PAYLOAD_SIZE);
             sendto(dst_fd, out_buf, sizeof(out_buf), 0, (struct sockaddr*)&dst_addr, sizeof(dst_addr));
+
+            // Interleaved Parity (Even/Odd Interleaving to beat Burst Losses)
+            uint8_t ev_parity[FRAME_PAYLOAD_SIZE] = {0};
+            for (int i = 0; i < FEC_K; i += 2) {
+                for (int j = 0; j < FRAME_PAYLOAD_SIZE; j++) {
+                    ev_parity[j] ^= group_payloads[i][j];
+                }
+            }
+
+            Header e_hdr;
+            e_hdr.seq = htonl(group_seqs[0]);
+            e_hdr.type = 2; // Interleaved Parity
+            e_hdr.group_base = htonl(group_seqs[0]);
+
+            memcpy(out_buf, &e_hdr, sizeof(Header));
+            memcpy(out_buf + sizeof(Header), ev_parity, FRAME_PAYLOAD_SIZE);
+            sendto(dst_fd, out_buf, sizeof(out_buf), 0, (struct sockaddr*)&dst_addr, sizeof(dst_addr));
+
             group_count = 0;
         }
     }
