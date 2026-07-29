@@ -3,15 +3,15 @@
 
 #include <stdint.h>
 
+#define FEC_K 4
+#define FEC_R 2
 #define FRAME_PAYLOAD_SIZE 160
-#define FEC_K 4  // Data frames per group
-#define FEC_R 2  // Redundancy / Parity frames per group
 
 #pragma pack(push, 1)
 typedef struct {
-    uint32_t seq;        // Original sequence number
-    uint8_t  type;       // 0 = DATA, 1 = ROW PARITY, 2 = DIAGONAL PARITY
-    uint32_t group_base; // Base sequence number for the FEC block
+    uint32_t seq;        // Sequence number
+    uint8_t  type;       // 0 = DATA, 1 = ROW_PARITY, 2 = INT_PARITY
+    uint32_t group_base; // Base sequence number for the FEC group
 } Header;
 #pragma pack(pop)
 
