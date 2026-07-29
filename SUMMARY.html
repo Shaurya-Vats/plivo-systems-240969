@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Plivo Systems Assignment Architecture Summary</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; padding: 2rem; max-width: 800px; margin: auto; background-color: #f9f9f9; color: #333; }
+        h1, h2 { color: #111; }
+        code { background: #eee; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.9em; }
+        .card { background: white; padding: 1.5rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 1.5rem; }
+    </style>
+</head>
+<body>
+    <h1>Plivo Flaky Network: Systems Architecture Summary</h1>
+    
+    <div class="card">
+        <h2>1. Design Strategy</h2>
+        <p>The solution utilizes proactive <strong>Forward Error Correction (FEC)</strong> using XOR block parity. Rather than paying the double RTT penalty of NACK-based retransmission, parity frames are sent immediately following every 2 data frames.</p>
+    </div>
+
+    <div class="card">
+        <h2>2. Protocol & Wire Format</h2>
+        <p>A custom 9-byte header encapsulates harness payloads:</p>
+        <ul>
+            <li><code>seq</code> (4-byte uint32): Sequence identifier.</li>
+            <li><code>type</code> (1-byte uint8): Frame classification (0 = Data, 1 = Parity).</li>
+            <li><code>group_base</code> (4-byte uint32): Sequence identifier of the group origin.</li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>3. System-Level Execution</h2>
+        <p>The receiver processes stream packets out-of-order, maintaining state maps for active FEC groups. Single missing frames per group are instantly reconstructed via XOR operations before immediate dispatch to the target playout socket.</p>
+    </div>
+</body>
+</html>
