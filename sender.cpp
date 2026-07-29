@@ -1,7 +1,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.t>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include "proto.h"
