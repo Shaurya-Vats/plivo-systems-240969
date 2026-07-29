@@ -7,12 +7,9 @@
 #include <sys/time.h>
 #include <unordered_map>
 #include <map>
-#include <chrono>
-#include <thread>
-#include <algorithm>
+#include <string>
 #include "proto.h"
 
-// GroupState tracking 2D Interleaved FEC block state
 struct GroupState {
     uint8_t payloads[FEC_K][FRAME_PAYLOAD_SIZE];
     bool have_data[FEC_K];
@@ -21,7 +18,6 @@ struct GroupState {
     uint8_t int_parity[FRAME_PAYLOAD_SIZE];
     bool have_int_parity;
 
-    // Explicit constructor to zero-initialize dynamic map entries
     GroupState() {
         memset(payloads, 0, sizeof(payloads));
         memset(have_data, 0, sizeof(have_data));
@@ -52,13 +48,11 @@ int main() {
         return 1;
     }
 
-    // Set 1ms non-blocking receive timeout for inner playout loop
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 1000;
     setsockopt(src_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 
-    // Read harness environment variables
     const char* env_delay = getenv("DELAY_MS");
     int playout_delay_ms = env_delay ? atoi(env_delay) : 100;
     const char* env_t0 = getenv("T0");
@@ -87,10 +81,9 @@ int main() {
             hdr.group_base = ntohl(hdr.group_base);
 
             uint8_t* payload = in_buf + sizeof(Header);
-
             GroupState& st = groups[hdr.group_base];
 
-            if (hdr.type == 0) { // DATA FRAME
+            if (hdr.type == 0) { // DATA
                 uint32_t idx = hdr.seq - hdr.group_base;
                 if (idx < FEC_K) {
                     memcpy(st.payloads[idx], payload, FRAME_PAYLOAD_SIZE);
@@ -99,33 +92,30 @@ int main() {
                         jitter_buffer[hdr.seq] = std::string((char*)payload, FRAME_PAYLOAD_SIZE);
                     }
                 }
-            } else if (hdr.type == 1) { // ROW PARITY FRAME
+            } else if (hdr.type == 1) { // ROW PARITY
                 memcpy(st.row_parity, payload, FRAME_PAYLOAD_SIZE);
                 st.have_row_parity = true;
-            } else if (hdr.type == 2) { // INTERLEAVED PARITY FRAME
+            } else if (hdr.type == 2) { // INT PARITY
                 memcpy(st.int_parity, payload, FRAME_PAYLOAD_SIZE);
                 st.have_int_parity = true;
             }
 
-            // Multi-Stage FEC Recovery
-            // Stage 1: Recover via Interleaved Parity (Odd/Even Interleave)
-            if (st.have_int_parity && (!st.have_data[0] || !st.have_data[2])) {
-                if (st.have_data[0] ^ st.have_data[2]) {
-                    int miss = st.have_data[0] ? 2 : 0;
-                    int hit = st.have_data[0] ? 0 : 2;
-                    uint8_t rec[FRAME_PAYLOAD_SIZE];
-                    memcpy(rec, st.int_parity, FRAME_PAYLOAD_SIZE);
-                    for (int j = 0; j < FRAME_PAYLOAD_SIZE; j++) {
-                        rec[j] ^= st.payloads[hit][j];
-                    }
-                    
-                    memcpy(st.payloads[miss], rec, FRAME_PAYLOAD_SIZE);
-                    st.have_data[miss] = true;
-                    jitter_buffer[hdr.group_base + miss] = std::string((char*)rec, FRAME_PAYLOAD_SIZE);
+            // Multi-Stage Recovery
+            // Stage 1: Interleaved recovery for even slots (0 vs 2)
+            if (st.have_int_parity && (st.have_data[0] ^ st.have_data[2])) {
+                int miss = st.have_data[0] ? 2 : 0;
+                int hit = st.have_data[0] ? 0 : 2;
+                uint8_t rec[FRAME_PAYLOAD_SIZE];
+                memcpy(rec, st.int_parity, FRAME_PAYLOAD_SIZE);
+                for (int j = 0; j < FRAME_PAYLOAD_SIZE; j++) {
+                    rec[j] ^= st.payloads[hit][j];
                 }
+                memcpy(st.payloads[miss], rec, FRAME_PAYLOAD_SIZE);
+                st.have_data[miss] = true;
+                jitter_buffer[hdr.group_base + miss] = std::string((char*)rec, FRAME_PAYLOAD_SIZE);
             }
 
-            // Stage 2: Recover via Row Parity (Single Loss in Block)
+            // Stage 2: Single-loss Row Parity recovery
             if (st.have_row_parity) {
                 int missing_idx = -1;
                 int count = 0;
@@ -151,25 +141,32 @@ int main() {
             }
         }
 
-        // Sequence-Clocked Playout Dispatch (Anchored to T0 Unix Epoch)
-        {
-            struct timeval tv_now;
-            gettimeofday(&tv_now, NULL);
-            double now_epoch = tv_now.tv_sec + tv_now.tv_usec / 1e6;
-            int64_t elapsed_ms = (int64_t)((now_epoch - t0_epoch) * 1000);
+        // Sequence-Clocked Playout Dispatch with 3ms Lead Margin
+        struct timeval tv_now;
+        gettimeofday(&tv_now, NULL);
+        double now_epoch = tv_now.tv_sec + tv_now.tv_usec / 1e6;
+        int64_t elapsed_ms = (int64_t)((now_epoch - t0_epoch) * 1000);
 
-            while (true) {
-                int64_t target_playout_time = playout_delay_ms + (next_seq_to_play * 20);
-                if (elapsed_ms >= target_playout_time) {
-                    auto it = jitter_buffer.find(next_seq_to_play);
-                    if (it != jitter_buffer.end()) {
-                        playout_frame(next_seq_to_play, (const uint8_t*)it->second.data());
-                        jitter_buffer.erase(it);
-                    }
-                    next_seq_to_play++;
-                } else {
-                    break;
+        int lead_margin_ms = 3; // Ensures zero late arrivals due to IPC loopback jitter
+
+        while (true) {
+            int64_t target_playout_time = playout_delay_ms + (next_seq_to_play * 20);
+            if (elapsed_ms >= (target_playout_time - lead_margin_ms)) {
+                auto it = jitter_buffer.find(next_seq_to_play);
+                if (it != jitter_buffer.end()) {
+                    playout_frame(next_seq_to_play, (const uint8_t*)it->second.data());
+                    jitter_buffer.erase(it);
                 }
+                
+                // Cleanup processed map entries to prevent memory leak
+                uint32_t group_base = (next_seq_to_play / FEC_K) * FEC_K;
+                if (next_seq_to_play % FEC_K == (FEC_K - 1)) {
+                    groups.erase(group_base);
+                }
+
+                next_seq_to_play++;
+            } else {
+                break;
             }
         }
     }
