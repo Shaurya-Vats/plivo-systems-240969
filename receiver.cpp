@@ -7,13 +7,12 @@
 #include <sys/time.h>
 #include <unordered_map>
 #include <map>
+#include <string>
 #include "proto.h"
 
-// Fix: the original code fired playout the instant elapsed_ms >= target,
-// which (given 1ms poll granularity + send/scheduling/loopback latency)
-// meant the packet always arrived AFTER the deadline -> 100% misses.
-// Sending with a lead margin fixes this.
-#define PLAYOUT_MARGIN_MS 8
+// 3ms lead margin is the sweet spot: safe against socket IPC latency
+// while preventing "too early" playout violations.
+#define PLAYOUT_MARGIN_MS 3
 
 struct GroupState {
     uint8_t payloads[FEC_K][FRAME_PAYLOAD_SIZE];
@@ -53,8 +52,7 @@ int main() {
         return 1;
     }
 
-    // Fix: tighter poll interval (was 1ms) so the margin above is checked
-    // with enough resolution to be honored precisely.
+    // 250us poll granularity
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 250;
@@ -122,7 +120,7 @@ int main() {
                 }
             }
 
-            // Stage 2: recover via row parity (any single remaining loss)
+            // Stage 2: recover via row parity
             if (st.have_row_parity) {
                 int missing_idx = -1, count = 0;
                 for (int i = 0; i < FEC_K; i++) {
@@ -152,8 +150,6 @@ int main() {
 
             while (true) {
                 int64_t target_playout_time = playout_delay_ms + (next_seq_to_play * 20);
-                // Fix: fire with a lead margin instead of exactly at the
-                // deadline, so the packet is delivered before it, not after.
                 if (elapsed_ms >= target_playout_time - PLAYOUT_MARGIN_MS) {
                     auto it = jitter_buffer.find(next_seq_to_play);
                     if (it != jitter_buffer.end()) {
@@ -166,7 +162,7 @@ int main() {
                 }
             }
 
-            // Fix: bound memory growth — original never erased from `groups`.
+            // Bound memory growth
             if (next_seq_to_play >= last_group_cleaned + FEC_K * 4) {
                 uint32_t safe_base = (next_seq_to_play >= (uint32_t)(FEC_K * 2))
                                       ? next_seq_to_play - FEC_K * 2 : 0;
