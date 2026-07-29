@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unordered_map>
 #include <map>
 #include <chrono>
@@ -45,14 +46,15 @@ int main() {
     tv.tv_usec = 1000; // 1 ms polling clock loop
     setsockopt(src_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 
+    // Read environment variables from harness
     const char* env_delay = getenv("DELAY_MS");
     int playout_delay_ms = env_delay ? atoi(env_delay) : 100;
+    const char* env_t0 = getenv("T0");
+    double t0_epoch = env_t0 ? atof(env_t0) : 0.0;
 
     std::unordered_map<uint32_t, GroupState> groups;
     std::map<uint32_t, std::string> jitter_buffer;
     uint32_t next_seq_to_play = 0;
-    bool t0_initialized = false;
-    std::chrono::steady_clock::time_point t0;
 
     auto playout_frame = [&](uint32_t seq, const uint8_t* payload) {
         uint8_t out_buf[164];
@@ -74,11 +76,6 @@ int main() {
 
             uint8_t* payload = in_buf + sizeof(Header);
 
-            if (!t0_initialized && hdr.type == 0) {
-                t0 = std::chrono::steady_clock::now();
-                t0_initialized = true;
-            }
-
             GroupState& st = groups[hdr.group_base];
 
             if (hdr.type == 0) { // DATA
@@ -99,7 +96,7 @@ int main() {
             }
 
             // Multi-Stage FEC Burst Recovery
-            // Stage 1: Single loss recovery via Interleaved Parity
+            // Stage 1: Interleaved Parity Recovery
             if (st.have_int_parity && (!st.have_data[0] || !st.have_data[2])) {
                 if (st.have_data[0] ^ st.have_data[2]) {
                     int miss = st.have_data[0] ? 2 : 0;
@@ -138,10 +135,12 @@ int main() {
             }
         }
 
-        // Sequence-Clocked Jitter Playout Dispatch
-        if (t0_initialized) {
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0).count();
+        // Sequence-Clocked Absolute Epoch Playout Dispatch
+        {
+            struct timeval tv_now;
+            gettimeofday(&tv_now, NULL);
+            double now_epoch = tv_now.tv_sec + tv_now.tv_usec / 1e6;
+            int64_t elapsed_ms = (int64_t)((now_epoch - t0_epoch) * 1000);
 
             while (true) {
                 int64_t target_playout_time = playout_delay_ms + (next_seq_to_play * 20);
