@@ -12,13 +12,24 @@
 #include <algorithm>
 #include "proto.h"
 
+// GroupState tracking 2D Interleaved FEC block state
 struct GroupState {
     uint8_t payloads[FEC_K][FRAME_PAYLOAD_SIZE];
-    bool have_data[FEC_K] = {false};
+    bool have_data[FEC_K];
     uint8_t row_parity[FRAME_PAYLOAD_SIZE];
-    bool have_row_parity = false;
+    bool have_row_parity;
     uint8_t int_parity[FRAME_PAYLOAD_SIZE];
-    bool have_int_parity = false;
+    bool have_int_parity;
+
+    // Explicit constructor to zero-initialize dynamic map entries
+    GroupState() {
+        memset(payloads, 0, sizeof(payloads));
+        memset(have_data, 0, sizeof(have_data));
+        memset(row_parity, 0, sizeof(row_parity));
+        memset(int_parity, 0, sizeof(int_parity));
+        have_row_parity = false;
+        have_int_parity = false;
+    }
 };
 
 int main() {
@@ -41,12 +52,13 @@ int main() {
         return 1;
     }
 
+    // Set 1ms non-blocking receive timeout for inner playout loop
     struct timeval tv;
     tv.tv_sec = 0;
-    tv.tv_usec = 1000; // 1 ms polling clock loop
+    tv.tv_usec = 1000;
     setsockopt(src_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 
-    // Read environment variables from harness
+    // Read harness environment variables
     const char* env_delay = getenv("DELAY_MS");
     int playout_delay_ms = env_delay ? atoi(env_delay) : 100;
     const char* env_t0 = getenv("T0");
@@ -78,7 +90,7 @@ int main() {
 
             GroupState& st = groups[hdr.group_base];
 
-            if (hdr.type == 0) { // DATA
+            if (hdr.type == 0) { // DATA FRAME
                 uint32_t idx = hdr.seq - hdr.group_base;
                 if (idx < FEC_K) {
                     memcpy(st.payloads[idx], payload, FRAME_PAYLOAD_SIZE);
@@ -87,23 +99,25 @@ int main() {
                         jitter_buffer[hdr.seq] = std::string((char*)payload, FRAME_PAYLOAD_SIZE);
                     }
                 }
-            } else if (hdr.type == 1) { // ROW PARITY
+            } else if (hdr.type == 1) { // ROW PARITY FRAME
                 memcpy(st.row_parity, payload, FRAME_PAYLOAD_SIZE);
                 st.have_row_parity = true;
-            } else if (hdr.type == 2) { // INTERLEAVED PARITY
+            } else if (hdr.type == 2) { // INTERLEAVED PARITY FRAME
                 memcpy(st.int_parity, payload, FRAME_PAYLOAD_SIZE);
                 st.have_int_parity = true;
             }
 
-            // Multi-Stage FEC Burst Recovery
-            // Stage 1: Interleaved Parity Recovery
+            // Multi-Stage FEC Recovery
+            // Stage 1: Recover via Interleaved Parity (Odd/Even Interleave)
             if (st.have_int_parity && (!st.have_data[0] || !st.have_data[2])) {
                 if (st.have_data[0] ^ st.have_data[2]) {
                     int miss = st.have_data[0] ? 2 : 0;
                     int hit = st.have_data[0] ? 0 : 2;
                     uint8_t rec[FRAME_PAYLOAD_SIZE];
                     memcpy(rec, st.int_parity, FRAME_PAYLOAD_SIZE);
-                    for (int j = 0; j < FRAME_PAYLOAD_SIZE; j++) rec[j] ^= st.payloads[hit][j];
+                    for (int j = 0; j < FRAME_PAYLOAD_SIZE; j++) {
+                        rec[j] ^= st.payloads[hit][j];
+                    }
                     
                     memcpy(st.payloads[miss], rec, FRAME_PAYLOAD_SIZE);
                     st.have_data[miss] = true;
@@ -111,7 +125,7 @@ int main() {
                 }
             }
 
-            // Stage 2: Full Row Parity Recovery
+            // Stage 2: Recover via Row Parity (Single Loss in Block)
             if (st.have_row_parity) {
                 int missing_idx = -1;
                 int count = 0;
@@ -125,7 +139,9 @@ int main() {
                     memcpy(rec, st.row_parity, FRAME_PAYLOAD_SIZE);
                     for (int i = 0; i < FEC_K; i++) {
                         if (i != missing_idx) {
-                            for (int j = 0; j < FRAME_PAYLOAD_SIZE; j++) rec[j] ^= st.payloads[i][j];
+                            for (int j = 0; j < FRAME_PAYLOAD_SIZE; j++) {
+                                rec[j] ^= st.payloads[i][j];
+                            }
                         }
                     }
                     memcpy(st.payloads[missing_idx], rec, FRAME_PAYLOAD_SIZE);
@@ -135,7 +151,7 @@ int main() {
             }
         }
 
-        // Sequence-Clocked Absolute Epoch Playout Dispatch
+        // Sequence-Clocked Playout Dispatch (Anchored to T0 Unix Epoch)
         {
             struct timeval tv_now;
             gettimeofday(&tv_now, NULL);
